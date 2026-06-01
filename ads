@@ -6,7 +6,7 @@
 > **和 maimaibot 项目记忆的关系**:两份独立。这份只讲 ad-logger,maimaibot 的事去看那一份。
 > 它们跑在同一台 VPS 上,共用基础设施,但**代码、配置、systemd 完全独立**。
 >
-> **最后验证**:2026-05-22(LLM 解析全功能,bug fix 完成)
+> **最后验证**:2026-05-26(阶段 8 第一+二刀完工,每日对账 + 月度看板上线)
 >
 > **用法**:本文件是"活文件",每次重大变更后更新末尾的"变更日志",保持和 VPS 状态同步。
 
@@ -18,7 +18,8 @@
 - **项目目标**:CEO 在户商群转发消息给 bot,bot 自动解析后写入 Google Sheets。
   替代以前的"手抄表格"。
 - **bot 实例**:`@maimai_ad_logger_bot`(显示名"麦麦的户商登记")
-- **当前状态**:已上线,24/7 运行在 VPS。LLM 全功能 + 多账户支持 + 编辑/取消/白名单都通过
+- **当前状态**:已上线,24/7 运行在 VPS。LLM 全功能 + 多账户支持 + 编辑/取消/白名单都通过。
+  阶段 8 完工:ad-logger-data Sheets 内含「每日对账」sheet(月度看板 + 每日明细)
 - **VPS**:65.49.198.172(和 maimaibot 同一台,Ubuntu 22.04.5 LTS,UTC 时区)
 - **运行用户**:maimaibot(和 maimaibot 共用同一个 Linux 用户)
 - **systemd 服务**:`ad-logger.service`(独立,和 maimaibot-* 平级)
@@ -46,14 +47,40 @@
 - **户型**:户商代号,如 `PT media-233`、`LBTG-A2014+8`(`+8` 是户型的一部分,不要丢)
 - **账户ID**:广告平台分配的 14-16 位数字
 - **货币**:单一货币,不记币种和汇率
-- **下户消息的"政策 30+8"**:30 是成本,8 是手续费
-- **下户消息的"格式 2+3"**:2 是成本,3 是手续费(同义)
+- **成本**:单位是**元**(固定金额)
+- **手续费**:单位是**%**(百分比),**不是元**
+- **下户消息的"政策 30+8"**:30 是成本(元),8 是手续费(%)
+- **下户消息的"格式 2+3"**:⚠️ 这里 2 和 3 **不是费用**,是"2 个账户 + 3 个主页"的捆绑销售描述。
+  bot 的 LLM 会误读成"成本 2 / 手续费 3",麦麦需要**手工修正**为实际谈定价格(如 50+5)
+- **下户应付公式** = 成本(元) + 自带余额 × 手续费 / 100
+- **充值应付公式** = 充值金额 + 充值金额 × 手续费 / 100
 - **异常类型**:统一记为"封禁"(无论原文是死户/封停/限流/风控)
-- **处理方式**:消息里没有,bot 给按钮 [清退] [转移] [其他](阶段 4.7 未实现,字段留空,需要时手动编辑)
+- **处理方式**:字段留空,需要时手动编辑
 - **异常时余额**:
   - 优先级 1:有"余额:340.19"这种明确数字 → 用数字
   - 优先级 2:只有"清零"/"清0" → 0
   - 优先级 3:都没有 → null
+
+### 户商前缀列表(共 9 个)
+
+| 前缀 | 户型示例 | 备注 |
+|---|---|---|
+| PT media | PT media-233 | 单卖,成本 30 元,手续费 8% |
+| Ku Shin | Ku Shin-TZCH-LTD-148 | 手续费 11% |
+| Metatool | Metatool-TZCH-LTD-24 | 手续费 11% |
+| LBTG | LBTG-A2014+8 | 捆绑售卖(2 户 + 3 主页),麦麦手工调整为 50+0 成本 |
+| GOODADS | GOODADS 5270 8 | 单卖,成本 40 元,手续费 5% |
+| CMTG | CMTG-A805-8 | 捆绑售卖,同 LBTG |
+| XI | XI-Lara-0430-22 | 手续费 11% |
+| superlucky | superlucky-(-8)-Mai-... | 成本 30 元,手续费 5% |
+| zhuzhou0430 | zhuzhou0430-396 | 成本 30 元,手续费 5% |
+
+### 对账规则
+
+- **每天总账**:麦麦每天给各户商打一次款,按户商分别打
+- **"余额转入"充值不算应付**:充值表里备注为"余额转入"的行是账户间换钱,不产生新打款
+- **LBTG/CMTG 捆绑模式**:原始消息"格式 2+3"代表"2 个账户 + 3 个主页",
+  bot 识别不了,会误写成"成本 2 / 手续费 3",**麦麦需手工改为实际价格(如 50/0 交替)**
 
 ---
 
@@ -95,7 +122,7 @@
 
 ---
 
-## 📁 VPS 完整文件布局(2026-05-22 验证)
+## 📁 VPS 完整文件布局(2026-05-26 验证)
 
 ```
 /home/maimaibot/                              # 和 maimaibot 共用 home
@@ -110,6 +137,13 @@
 
 /etc/systemd/system/
 └── ad-logger.service       (~1.2 KB)         # systemd 守护
+
+Mac 本地(一次性工具脚本,不上 VPS):
+~/Downloads/Google auto/
+├── setup_reconcile_sheet_v2.py               # ★ 阶段 8 建表脚本(已跑过一次)
+├── credentials.json                           # 同 VPS 上的服务账号密钥
+├── bot.py / parser_llm.py / sheets.py        # 开发用本地副本
+└── 设计思路汇总.md                            # 阶段 8 设计决策记录
 ```
 
 ### env 字段(都已配置好)
@@ -127,7 +161,7 @@ ANTHROPIC_API_KEY=<和 maimaibot 共用,从 /home/maimaibot/.config/claude-bot/e
 - **项目名**:`ad-logger`,项目 ID 后缀 `496909`
 - **服务账号邮箱**:`ad-logger-bot@ad-logger-496909.iam.gserviceaccount.com`(Editor 权限)
 - **Sheets ID**:`14bbOAZ3jZ8dZyMMlg_RCl-1VW0MWhP476zy8Qo5OSQo`
-- **Sheets 文件名**:`ad-logger-data`(3 个 sheet:下户表/充值表/异常账户表)
+- **Sheets 文件名**:`ad-logger-data`(4 个 sheet:下户表/充值表/异常账户表/每日对账)
 - **开启的 API**:Google Sheets API、Google Drive API
 
 ---
@@ -154,25 +188,81 @@ ANTHROPIC_API_KEY=<和 maimaibot 共用,从 /home/maimaibot/.config/claude-bot/e
 
 **LLM 调用频率**:每条消息**只调 1 次**(选完类型那一步),编辑/写入不调 LLM。
 
-**和 maimaibot 共用 API key**:成本算到同一个账单,目前没分离;
-日后如果想单独追踪,在 Anthropic Console 给 ad-logger 申请独立 key。
+---
+
+## 📊 阶段 8:「每日对账」sheet 说明
+
+### 定位
+
+每天打完款,打开这个 sheet,**1 分钟内确认今天给户商打的钱对不对**。
+
+### 布局(「每日对账」sheet 结构)
+
+```
+第 1 行    📊 本月看板(标题,合并单元格)
+第 2 行    时间范围:[B2 起始日期] 至 [D2 结束日期]   ← 手改这两格调整范围
+第 4-6 行  顶部 6 个大数字
+           B4:总应付户商  E4:总下户笔数  H4:总充值笔数
+           B5:总下户成本  E5:总下户手续费
+           B6:总充值金额  E6:总充值手续费
+第 8 行    --- 按户商汇总(本月范围) ---
+第 9 行    表头(户商/下户笔数/下户成本/下户手续费/充值笔数/充值金额/充值手续费/应付合计)
+第10-18行  9 个户商各一行(固定顺序:PT media/Ku Shin/Metatool/LBTG/GOODADS/CMTG/XI/superlucky/zhuzhou0430)
+第 20 行   --- 每日明细 ---
+第 22 行   表头
+第 23 行起 每日 × 每户商 明细(全公式自动计算)
+```
+
+**前 9 行冻结**:滚动看明细时,看板始终可见。
+
+### 关键公式逻辑
+
+```
+下户手续费金额  = 自带余额 × 手续费% / 100  (SUMPRODUCT)
+充值手续费金额  = 充值金额 × 手续费% / 100  (SUMPRODUCT)
+余额转入        = 排除(充值表备注 = "余额转入" 的行不计入)
+户商前缀匹配    = LEFT(户型, LEN(户商)) = 户商  (精确前缀,不依赖通配符)
+```
+
+### 自检关系(公式被改坏时会暴露)
+
+```
+顶部「总应付户商」 = 9 个户商「应付合计」加起来  (两者口径必须完全一致)
+```
+
+**5 月基准数据**(2026-05-26 验证):
+- 总应付 ¥33,197.00
+- 总下户笔数 65
+- 总充值笔数 94(99 - 5 余额转入)
+- 5/26 LBTG 单日应付 ¥10,747.50(与麦麦实际打款金额**完全一致** ✅)
+
+### 维护操作
+
+| 场景 | 操作 |
+|---|---|
+| 调整时间范围 | Sheets 里直接改 B2 / D2 |
+| 新增户商 | 改 `setup_reconcile_sheet_v2.py` 顶部 VENDORS 列表 → Mac 上重跑 |
+| 让明细包含新日期 | Mac 上重跑 `setup_reconcile_sheet_v2.py`(会问是否删除重建,选 y) |
+| 数据量 > 1000 行 | 改脚本 DATA_RANGE_MAX → 重跑 |
+
+⚠️ **明细不自动新增行**:bot 写入新数据后,看板公式自动更新,但明细的"日期×户商"行是脚本一次性生成的。建议**每月月初重跑一次脚本**让新一个月的行出现。
 
 ---
 
 ## 🛠️ 日常运维速查
 
 ### 看服务状态
-```
+```bash
 systemctl status ad-logger --no-pager
-systemctl is-active ad-logger     # 简短输出 active/inactive
+systemctl is-active ad-logger
 ```
 
 ### 看日志
-```
+```bash
 # 实时
 journalctl -u ad-logger -f
 
-# 最近 N 分钟(诊断时常用)
+# 最近 N 分钟
 journalctl -u ad-logger --since "10 minutes ago" --no-pager
 
 # 最近 N 条
@@ -180,38 +270,29 @@ journalctl -u ad-logger -n 50 --no-pager
 ```
 
 ### 重启服务
-```
-# 改了 bot.py / parser_llm.py / sheets.py / parser.py 都要重启才生效
+```bash
 systemctl restart ad-logger
 sleep 5 && journalctl -u ad-logger -n 10 --no-pager
 ```
 
 ### 改 env / 密钥
-```
+```bash
 nano /home/maimaibot/.config/ad-logger/env
 systemctl restart ad-logger
 ```
 
 ### 怀疑代码没传上去时
-```
-# 看文件修改时间
+```bash
 ls -la /home/maimaibot/ad-logger/
-
-# 找特定标识(比如阶段 6 加的日志增强)
 grep -c "消息原文" /home/maimaibot/ad-logger/bot.py        # 应该 > 0
-grep -c "PROMPT_RECHARGE" /home/maimaibot/ad-logger/parser_llm.py    # 应该是 1
+grep -c "PROMPT_RECHARGE" /home/maimaibot/ad-logger/parser_llm.py  # 应该是 1
 ```
 
 ### 怀疑 polling 冲突(Conflict 错)
-```
-# 看是否有孤儿进程
+```bash
 ps aux | grep "ad-logger/bot.py" | grep -v grep
-# 应该只有 1 行(systemd 启动的),如果有 2 行就有孤儿
-
-# 杀掉孤儿
+# 应该只有 1 行,如果有 2 行就有孤儿
 kill <PID>
-
-# 极端情况:让 BotFather /revoke 重发 token,所有 polling 客户端自动失效
 ```
 
 ---
@@ -220,23 +301,23 @@ kill <PID>
 
 ### Mac 文件位置
 ```
-/Users/<你的用户名>/Downloads/Google auto/    # 注意有空格,scp 时用双引号
+/Users/chuxizhao/Downloads/Google auto/    # 注意有空格,scp 时用双引号
 ```
 
 ### scp 上传(Mac 终端,zsh)
 
 ⚠️ **关键**:用**双引号**包路径,**不要**再加反斜杠转义:
 
-```
+```bash
 # 单个文件
-scp "/Users/<你>/Downloads/Google auto/bot.py" root@65.49.198.172:/home/maimaibot/ad-logger/bot.py
+scp "/Users/chuxizhao/Downloads/Google auto/bot.py" root@65.49.198.172:/home/maimaibot/ad-logger/bot.py
 
 # 多个文件
-scp "/Users/<你>/Downloads/Google auto/bot.py" "/Users/<你>/Downloads/Google auto/parser_llm.py" root@65.49.198.172:/home/maimaibot/ad-logger/
+scp "/Users/chuxizhao/Downloads/Google auto/bot.py" "/Users/chuxizhao/Downloads/Google auto/parser_llm.py" root@65.49.198.172:/home/maimaibot/ad-logger/
 ```
 
-### VPS 上 chown + restart(scp 上去归 root,要交回 maimaibot)
-```
+### VPS 上 chown + restart
+```bash
 chown maimaibot:maimaibot /home/maimaibot/ad-logger/bot.py /home/maimaibot/ad-logger/parser_llm.py
 systemctl restart ad-logger
 sleep 8 && journalctl -u ad-logger -n 15 --no-pager
@@ -244,68 +325,39 @@ sleep 8 && journalctl -u ad-logger -n 15 --no-pager
 
 ---
 
-## 🎯 改 LLM prompt 的标准流程(最常用!)
-
-bot 上线后,**遇到识别错误时主要靠改 prompt 修复**,代码框架不动。
+## 🎯 改 LLM prompt 的标准流程
 
 ### Step 1:从日志找证据
-```
+```bash
 journalctl -u ad-logger --since "5 minutes ago" --no-pager
 ```
-
-找到 `消息原文: '...'` 和它后面的 `--- 账户 X ---` 字段解析结果,
-看哪个字段错了。
+找到 `消息原文: '...'` 和它后面的字段解析结果,看哪个字段错了。
 
 ### Step 2:在沙箱测试改 prompt
 
-(让 Claude 帮你改,然后沙箱跑一次真实 LLM 调用,验证修对了)
+### Step 3:scp + chown + restart
 
-### Step 3:scp + chown + restart(同上)
-
-### Step 4:回归测试
-
-用**老样本**重测一次,确认没把旧 case 改坏。
+### Step 4:回归测试(用老样本重测)
 
 ---
 
 ## 🐛 已知的"prompt 优先级"心得
 
 LLM 偶尔会按 prompt 规则的**出现顺序**判断,而不是按"全文匹配"。
-**写多条规则时,务必明确优先级**,并给出"看似冲突的 case"该怎么处理。
-
-**反例**(2026-05-22 的 anomaly bug):
-```
-5. 异常时余额:
-   - 消息含"清0"/"清零" → 填 0       ← LLM 看到第一条就停了
-   - 消息含"余额 200"/"余额清135" → 提取数字
-```
-真实消息 `挂户清零\n余额:340.19` 被识别成 0(错)。
-
-**修复**:
-```
-5. 异常时余额(按优先级判断,先看是否有明确数字):
-   - 优先级 1(最高):"余额:340"/"余额 200" → 提取数字
-   - 优先级 2:只有"清零"/"清0" → 0
-   - 优先级 3:都没有 → null
-   - 特别注意:同时含"清零"和"余额:340.19" → 以 340.19 为准
-```
+**写多条规则时,务必明确优先级**。
 
 ---
 
-## ⚠️ 踩过的 6 个坑(避免再踩)
+## ⚠️ 踩过的坑(避免再踩)
 
-1. **孤儿 bot 进程**:`Ctrl+C` 不一定清干净进程。**判断进程退出要用 `ps aux | grep`**,
-   不是看 Ctrl+C 后屏幕回到提示符就以为完事了。
-2. **deleteWebhook 清不掉 polling 冲突**:对方进程会立刻重连。**必须 kill 那个进程的 PID**,
-   或者最后一招:让 BotFather `/revoke` 重发 token,所有旧客户端立刻失效。
-3. **scp 路径有空格**:Mac 的 zsh 对反斜杠转义敏感。**永远用双引号包整段路径**,
-   不要在双引号里再加 `\`(双重转义会失效)。
-4. **heredoc 终端粘贴回显错乱**:实际写入文件的内容**通常**正确,但终端显示可能错位。
-   **永远以 `cat 文件` 输出为准**,不要看粘贴时屏幕显示判断成功与否。
-5. **Python `str.format()` 在 prompt 含 JSON 时炸**:prompt 里有 `{"accounts": ...}`,
-   `.format()` 会把 `{}` 当占位符报 `KeyError`。**改用 `replace()` 替代 `.format()`**。
-6. **Mac 换机文件没自动同步**:从 MacBook Pro 换到 MacBook Air,
-   旧 Mac 上的 `Google auto/` 文件夹在新 Mac 上是空的,要重新下载所有文件。
+1. **孤儿 bot 进程**:`Ctrl+C` 不一定清干净进程,判断进程退出要用 `ps aux | grep`
+2. **deleteWebhook 清不掉 polling 冲突**:必须 kill 那个进程的 PID
+3. **scp 路径有空格**:永远用双引号包整段路径,不要在双引号里再加 `\`
+4. **heredoc 终端粘贴回显错乱**:以 `cat 文件` 输出为准,不要看粘贴时屏幕显示
+5. **Python `str.format()` 在 prompt 含 JSON 时炸**:改用 `replace()` 替代 `.format()`
+6. **Mac 换机文件没自动同步**:从 MacBook Pro 换到 MacBook Air 后旧文件夹空了
+7. **gspread `update()` 参数顺序**:新版 gspread 要求先传 values 再传 range_name(或用命名参数)。
+   旧写法 `ws.update("A1", values)` 会出 DeprecationWarning,但功能正常
 
 ---
 
@@ -318,10 +370,9 @@ PT media-233广告账户编号:1391544663010336
 wpzerdq5893@hotmail.com
 政策30+8
 ```
-LLM 预期:户型 `PT media-233` / 账户ID `1391544663010336` / 自带 200 /
-邮箱 `wpzerdq5893@hotmail.com` / 成本 30 / 手续费 8 / 备注 `RQ`(LLM 智能放备注)
+预期:户型 `PT media-233` / 账户ID `1391544663010336` / 自带 200 / 邮箱 `wpzerdq5893@hotmail.com` / 成本 30 / 手续费 8 / 备注 `RQ`
 
-### 下户 - 多账户(新格式)
+### 下户 - 多账户(新格式,注意 2+3 是数量非费用)
 ```
 格式:2+3 时区:-8
 
@@ -331,26 +382,21 @@ LLM 预期:户型 `PT media-233` / 账户ID `1391544663010336` / 自带 200 /
 
 主页链接
 https://www.facebook.com/profile.php?id=61589343270244
-https://www.facebook.com/profile.php?id=61588951127793
-
-主页账户已授权绑定
-2027837158107880
 ```
-LLM 预期:**2 个账户**,每个成本 2、手续费 3、备注 `时区:-8`,
-**主页链接和主页授权 ID 都忽略**。
+预期:**2 个账户**,LLM 会误读成"成本 2 / 手续费 3",**麦麦需手工改**。
+主页链接忽略。
 
 ### 充值 - 多账户
 ```
 LBTG-A183-8
 广告账户编号:1667569044574876
-
 充值350
 
 LBTG-A182-8
 广告账户编号:959566970147787
 充值350
 ```
-LLM 预期:**2 个账户**,各充值 350,户型 `LBTG-A183-8` 和 `LBTG-A182-8`(`-8` 是户型一部分)。
+预期:**2 个账户**,各充值 350。
 
 ### 异常 - 经典(清零)
 ```
@@ -358,166 +404,98 @@ PT media-233
 广告账户编号:1391544663010336
 死户,余额清0
 ```
-LLM 预期:异常类型 `封禁` / 异常时余额 `0`。
+预期:异常类型 `封禁` / 异常时余额 `0`。
 
-### 异常 - 有具体余额
+### 异常 - 有具体余额(优先级关键测试)
 ```
 LBTG-A2035+8
 编号:1494691845366664
 挂户清零
 余额:340.19
 ```
-LLM 预期:异常类型 `封禁` / 异常时余额 `340.19`(**不是 0**) / 备注 `挂户清零`。
+预期:异常类型 `封禁` / 异常时余额 `340.19`(**不是 0**)。
 
 ---
 
 ## 🔄 开新对话使用本文件的方法
 
-### 第一条消息(完整粘贴)
-```
-[完整粘贴本文件内容]
-```
+### 第一条消息(完整粘贴本文件内容)
 
 ### 第二条消息(说明本次要做什么),例如:
 - "bot 又遇到识别错误了,帮我排查"+ 贴日志
+- "阶段 8 对账 sheet 数字不对,帮我排查"+ 贴截图
 - "想加一个新字段,叫'XXX'"
-- "想做阶段 8(Sheets 汇总公式)"
 - "VPS 重启后 bot 没起来,帮看 status"
-
-Claude 读完本文件后,应该能:
-- 知道项目架构、现状、关键路径
-- 知道 LLM prompt 怎么改、改完怎么部署
-- 知道踩过的坑(避免重复)
-- 立即接上,不重复问已经解决过的问题
+- "上线 N 天了,用感反馈如下,讨论下一刀"
 
 ---
 
 ## 📝 变更日志
 
 ### 2026-05-19:阶段 1-2 启动
-- 阶段 1:写正则 parser.py,3 条样本 40 个字段断言全过(Mac 本地验证)
-- 阶段 2:Google Cloud 注册项目 `ad-logger`,开启 Sheets API + Drive API,
-  创建服务账号 + 下载 credentials.json,共享 Sheets 给服务账号 Editor 权限,
-  gspread 写入测试通过(Mac 本地)
-- **踩坑**:Google Cloud 强制 2SV,先开了两步验证再继续
+- 阶段 1:写正则 parser.py,3 条样本 40 个字段断言全过
+- 阶段 2:Google Cloud 注册,开启 API,gspread 写入测试通过
 
 ### 2026-05-20:阶段 3-5 完成
-- 阶段 3:BotFather 注册 `@maimai_ad_logger_bot`,Mac 本地 echo bot 跑通
-- 阶段 4:7 个小阶段,完成完整功能
-  - 4.1 最小可工作版(只 print 不写表)
-  - 4.2 加类型选择按钮
-  - 4.3 加平台选择按钮
-  - 4.4 加确认按钮 + 写入 Sheets(里程碑!)
-  - 4.5 加白名单
-  - 4.6 加编辑字段(D 方案:点 [编辑] 总按钮后弹字段列表)
-  - 4.7 异常处理方式(决定留空,需要时手动编辑)
-- 阶段 5:VPS 部署
-  - 建独立目录 `/home/maimaibot/ad-logger/` 和 `/home/maimaibot/.config/ad-logger/`
-  - scp 传 3 个 .py 文件 + credentials.json
-  - 装 gspread(`pip install --user`)
-  - 把 token 从代码里抠出来放 env(`os.environ.get` 兜底硬编码)
-  - 写 `ad-logger.service`(参考 maimaibot-ads,改 5 处)
-  - 验证开机自启 + 崩溃自动重启
-- **踩坑**:Mac zsh 反斜杠转义;VPS 上有孤儿 bot 进程导致 Conflict;Mac 换机后文件夹空
+- 阶段 3:BotFather 注册 bot,Mac 本地 echo bot 跑通
+- 阶段 4:7 个小阶段,完成完整功能(下户/充值/异常 + 白名单 + 编辑)
+- 阶段 5:VPS 部署,systemd 服务,开机自启验证
 
-### 2026-05-21:阶段 6-7 完成,bot 重大升级
-- 用户反馈"识别有很多问题",**加详细日志(消息原文 + 9 字段解析结果)**
-- 用真实消息诊断,发现**超过 50% 是多账户消息**,正则做不到智能
-- **架构变更:接入 Claude Haiku 4.5 LLM 解析**
-  - 新建 `parser_llm.py`,prompt 设计 + 调用 Anthropic API(用 urllib,没用 SDK)
-  - 复用 maimaibot 的 ANTHROPIC_API_KEY(grep 追加到 ad-logger env)
-  - 改 bot.py 支持字典列表(多账户清单 UI、批量写入)
-  - 改 sheets.py 加 `write_rows()` 函数
-  - 正则降为 fallback(LLM 失败时回退)
-- 阶段 7:LLM 扩展到充值 + 异常(每种类型一个 prompt,框架不变)
-- **踩坑**:Python `.format()` 在 prompt 含 JSON 时炸(改用 `replace()`)
+### 2026-05-21:阶段 6-7 完成
+- 接入 Claude Haiku 4.5 LLM 解析(新建 parser_llm.py)
+- 充值 + 异常 prompt 扩展完成
+- 踩坑:`.format()` 在 prompt 含 JSON 时炸,改用 `replace()`
 
 ### 2026-05-22:LLM prompt 优先级 bug 修复
-- **现象**:`挂户清零\n余额:340.19` 被识别为余额 0(错,应该是 340.19)
-- **诊断**:不是 LLM 抽风,是 anomaly prompt 规则 5 优先级写得不清,
-  LLM 看到"清零"就按第一条规则填 0,忽略了后面的"余额:340.19"
-- **修复**:改 anomaly prompt 规则 5,反转优先级:
-  - 优先级 1:有明确"余额:数字" → 用数字
-  - 优先级 2:只有"清零" → 0
-  - 优先级 3:都没有 → null
-  - 增加"挂户清零+余额:340.19"作为反例 case
-- **验证**:用同一条消息重测,LLM 正确抽出 `340.19`;
-  老样本 `死户,余额清0` 仍正确识别为 0(无回归)
-- **教训**:LLM 偶尔按 prompt 规则的"出现顺序"判断,**多条规则务必明确优先级**
+- **现象**:`挂户清零\n余额:340.19` 被识别为余额 0
+- **修复**:改 anomaly prompt 规则 5,明确"有明确数字优先级高于清零描述"
+- **教训**:LLM 偶尔按 prompt 规则出现顺序判断,多条规则务必明确优先级
 
-### <下次更新填这里>
-- 
+### 2026-05-26:阶段 8 第一+二刀完工(每日对账 + 月度看板)
+
+**业务对齐(本次踩坑才搞清楚的关键约定)**:
+- 字段单位:**成本 = 元**,**手续费 = %**
+- "格式 2+3"里的 2 和 3 是**数量**(2 个账户 + 3 个主页),不是费用。
+  bot 的 LLM 会误识别,麦麦需**手工修正**成实际成交价
+- 5/22 "余额转入" 备注的充值**不算应付户商**
+- LBTG/CMTG 捆绑模式下,成本记录为"50+0 交替"是麦麦手工调整的结果
+
+**新增 Sheets 结构**:
+- 在 ad-logger-data 新增第 4 个 sheet:「每日对账」
+- 布局:顶部看板(行 1-18) + 每日明细(行 22 起)
+- 时间范围可调(B2 / D2 手填)
+- 公式覆盖到第 1000 行,前 9 行冻结
+
+**验证**:
+- 5/26 LBTG 单日应付 ¥10,747.50 = 麦麦实际打款金额 ✅
+- 本月总应付 ¥33,197.00 = 9 户商汇总 ¥33,197.00 ✅
+
+**部署**:Mac 本地一次性运行 `setup_reconcile_sheet_v2.py`,
+VPS 上 bot 代码完全不动。
+
+**已知问题(优先级低)**:
+- 充值表有几行账户ID 显示为科学计数法,不影响对账
+- 异常表"实际清零金额"目前塞在备注列,应该有独立字段
+- 充值表 prompt 写"默认不抽手续费",但实际数据里手续费都有(行为对,文档错)
 
 ---
 
-## ⏳ 待办(放着,数据积累后再做)
+## ⏳ 待办
 
-### 阶段 8:Sheets 公式 + 数据透视表(暂缓)
-**目标**:在 Sheets 网页里加汇总公式,实现 3 种维度的汇总视图——
-- 按账户 ID:这个账户花了多少、充了多少、当前状态
-- 按时段(本月/本周):总充值、总下户费用
-- 按户商(PT media / LBTG):总下了多少户、收了多少钱
-
-**为什么暂缓**:数据还少(各表几十行),设计汇总等于猜需求。
-等漫用 1-2 周积累 100+ 行真实数据,需求自然清晰,30-40 分钟就能搞定。
-
-**预期方法**:不写代码,在 Sheets 网页里加 SUMIF 公式 + 数据透视表。
+### 阶段 8 后续候选(等用感反馈后决定优先级)
+- 每月月初重跑 `setup_reconcile_sheet_v2.py`(让新月份的明细行出现)
+- 户商政策表(手工维护每个户商的成本+手续费%)
+- 账户全生命周期(按账户ID 聚合)
+- 异常损失追踪(清零前累计充值多少)
+- 时间序列趋势(按周/月对比)
+- 充值表 prompt 校对(文档和行为对齐)
 
 ### 持续:遇到识别错误时调 prompt
-本质上 ad-logger 上线后就是个"漫用 + 偶尔调 prompt"的状态。
-每次遇到识别错误:
-1. 看日志拿到消息原文 + 错误的解析结果
+1. 看日志拿到消息原文 + 错误解析结果
 2. 改对应类型的 prompt
 3. 测试 + 回归测试
 4. 部署到 VPS
 
 ---
-### 2026-05-26:阶段 8 第一+二刀完工(每日对账 + 月度看板)
 
-**业务对齐(关键,这次踩了几个坑才搞清楚)**:
-- 字段单位:**成本 = 元**(固定金额),**手续费 = %**(百分比)
-- 下户应付公式 = 成本 + 自带余额 × 手续费 / 100
-- 充值应付公式 = 充值金额 + 充值金额 × 手续费 / 100
-- LBTG 的"50/0 交替"是麦麦**手工调整后**的形式(原消息"格式 2+3"
-  指的是"2 个账户 + 3 个主页",**不是费用**;LLM 抽错了,麦麦手动改正)
-- 5/22 "余额转入" 备注的 5 行充值**不算应付**(账户间换钱,不打新款)
-- 户商前缀按业务实际分 9 类:PT media / Ku Shin / Metatool / LBTG / 
-  GOODADS / CMTG / XI / superlucky / zhuzhou0430
-
-**新增 Sheets 结构**:在 ad-logger-data 里新增一个「每日对账」sheet,布局:
-- 第 1-2 行:看板标题 + 时间范围(B2 起、D2 止,**手动改可调整看板范围**)
-- 第 4-6 行:6 个顶部大数字(总应付/总下户笔数/总充值笔数/总下户成本/
-  总下户手续费/总充值金额/总充值手续费)
-- 第 10-18 行:9 个户商各一行,本月范围内的汇总
-- 第 22 行:明细表头
-- 第 23 行起:每日 × 户商 笛卡尔积明细(54+ 行)
-- 公式覆盖到第 1000 行,前 9 行冻结
-
-**验证**(5 月本期数据):
-- 5/26 LBTG 应付 ¥10,747.50 = 麦麦实际打款金额 ✅
-- 看板顶部总应付 ¥33,197.00 = 9 个户商汇总相加 ✅
-- 看板按户商加起来 = 顶部口径一致 ✅
-
-**部署**:Mac 本地一次性运行 `setup_reconcile_sheet_v2.py`,
-通过 ad-logger 服务账号 credentials 写入。VPS 上 bot 代码完全不动,
-公式自动跟随 bot 写入的新数据更新。
-
-**维护**:
-- 改时间范围:Sheets 里 B2 / D2 手填
-- 新增户商:改脚本顶部 VENDORS 列表,重跑脚本(会问是否重建)
-- 新增日期:**不自动出现新明细行**,需要每周/每月重跑一次脚本
-- 数据量 > 1000 行:改 DATA_RANGE_MAX,重跑
-
-**已知问题(优先级低,留待后续刀)**:
-- 充值表有几行账户ID 是科学计数法(2.20328E+15)显示,影响按账户ID 查询,
-  不影响对账(按户商前缀汇总)
-- 异常表的"实际清零金额"目前塞在备注列(像 "147.59"),应该有独立字段
-- 充值表 prompt 写"默认不抽手续费",但实际数据里手续费都填了 ——
-  prompt 文档错了但行为对(可能 LLM 看到"政策 5+8"自动迁移),需要校对
-
-**阶段 8 后续候选(暂不做)**:
-- 户商政策表(手工维护每个户商的成本+手续费%)
-- 账户全生命周期(按账户ID 聚合)
-- 异常损失追踪(异常账户清零前累计充值多少)
-- 时间序列趋势(按周/月对比)
-*本文件的设计原则:所有声明都经过 VPS 实际验证,所有改动都有时间线,所有命令都可以直接执行。*
+*本文件的设计原则:所有声明都经过验证,所有改动都有时间线,所有命令都可以直接执行。*
